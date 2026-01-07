@@ -37,7 +37,7 @@ Configuration:
 
 import os
 import time
-import ast
+import json
 import argparse
 import threading
 from datetime import datetime
@@ -67,7 +67,7 @@ options = {
 webdav_client = Client(options)
 
 # Constants
-RAW_NAMES_PREFIXES = ast.literal_eval(constants_secret['RAW_NAMES_PREFIXES'])
+RAW_NAMES_PREFIXES = json.loads(constants_secret['RAW_NAMES_PREFIXES'])
 RAW_REMOTE_DIR = constants_secret['RAW_REMOTE_DIR']
 UNSORTED_REMOTE_DIR = constants_secret['UNSORTED_REMOTE_DIR']
 WORKDIR = f"{os.getcwd()}/tmp"
@@ -107,7 +107,7 @@ def get_images_list(raw: str) -> list:
             name_condition = any(filename.startswith(prefix) for prefix in RAW_NAMES_PREFIXES)
             if name_condition and not file['isdir']:
                 files_for_processing.append(file['path'])
-        except (KeyError, TypeError, AttributeError) as e:
+        except (KeyError, TypeError, AttributeError, IndexError, ValueError) as e:
             print(f"Error processing file entry: {e.__class__.__name__}: {e}. File data: {file}")
     return files_for_processing
 
