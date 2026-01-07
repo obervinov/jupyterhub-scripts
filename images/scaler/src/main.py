@@ -24,13 +24,20 @@ Workflow:
 
 Configuration:
 - WebDAV credentials: Stored in Vault KV store under 'webdav' secret
+  Format: {"url": "https://...", "username": "...", "password": "..."}
 - Constants: Configurable via Vault 'scaler_constants' secret
+  Format: {
+    "RAW_NAMES_PREFIXES": ["raw", "image"],
+    "RAW_REMOTE_DIR": "_raw",
+    "UNSORTED_REMOTE_DIR": "_unsorted"
+  }
 - Frequency: Adjustable via --frequency command line parameter (default: 300 seconds)
 - Thread limit: Maximum 10 concurrent processing threads
 """
 
 import os
 import time
+import json
 import argparse
 import threading
 from datetime import datetime
@@ -60,7 +67,7 @@ options = {
 webdav_client = Client(options)
 
 # Constants
-RAW_NAMES_PREFIXES = constants_secret['RAW_NAMES_PREFIXES']
+RAW_NAMES_PREFIXES = json.loads(constants_secret['RAW_NAMES_PREFIXES'])
 RAW_REMOTE_DIR = constants_secret['RAW_REMOTE_DIR']
 UNSORTED_REMOTE_DIR = constants_secret['UNSORTED_REMOTE_DIR']
 WORKDIR = f"{os.getcwd()}/tmp"
@@ -97,11 +104,11 @@ def get_images_list(raw: str) -> list:
     for file in all_files:
         try:
             filename = file['path'].split("/")[-1]
-            name_condition = filename.startswith("Untitled") or filename.startswith("Unknown")
+            name_condition = any(filename.startswith(prefix) for prefix in RAW_NAMES_PREFIXES)
             if name_condition and not file['isdir']:
                 files_for_processing.append(file['path'])
-        except:
-            print(f"Error: {file}")
+        except (KeyError, TypeError, AttributeError, IndexError, ValueError) as e:
+            print(f"Error processing file entry: {e.__class__.__name__}: {e}. File data: {file}")
     return files_for_processing
 
 

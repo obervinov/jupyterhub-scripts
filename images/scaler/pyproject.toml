@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "webdav-image-scaler"
-version = "1.0.0"
+version = "1.0.1"
 description = "This project improves the quality of images in webdav directories with a specific pattern."
 authors = ["Bervinov Oleg <bervinov.ob@gmail.com>"]
 maintainers = ["Bervinov Oleg <bervinov.ob@gmail.com>"]
@@ -16,8 +16,8 @@ python = "^3.12"
 psycopg2-binary = "^2"
 webdavclient3 = "^3"
 opencv-python = "^4"
-logger = { git = "https://github.com/obervinov/logger-package.git", tag = "v2.0.0" }
-vault  = { git = "https://github.com/obervinov/vault-package.git", tag = "v4.0.1" } 
+logger = { git = "https://github.com/obervinov/logger-package.git", tag = "v2.0.4" }
+vault  = { git = "https://github.com/obervinov/vault-package.git", tag = "v4.0.3" } 
 
 [build-system]
 requires = ["poetry-core"]

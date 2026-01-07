@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "webdav-image-mover"
-version = "1.0.0"
+version = "1.0.1"
 description = "This script places images on top of their tags."
 authors = ["Bervinov Oleg <bervinov.ob@gmail.com>"]
 maintainers = ["Bervinov Oleg <bervinov.ob@gmail.com>"]
@@ -15,8 +15,8 @@ packages = [{include = "src"}]
 python = "^3.12"
 webdavclient3 = "^3"
 nc-py-api = "^0.20"
-logger = { git = "https://github.com/obervinov/logger-package.git", tag = "v2.0.0" }
-vault  = { git = "https://github.com/obervinov/vault-package.git", tag = "v4.0.1" } 
+logger = { git = "https://github.com/obervinov/logger-package.git", tag = "v2.0.4" }
+vault  = { git = "https://github.com/obervinov/vault-package.git", tag = "v4.0.3" } 
 
 [build-system]
 requires = ["poetry-core"]

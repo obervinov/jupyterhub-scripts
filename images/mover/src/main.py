@@ -22,8 +22,15 @@ Workflow:
 
 Configuration:
 - Nextcloud credentials: Stored in Vault KV store under 'webdav' secret
+  Format: {"host_url": "https://...", "username": "...", "password": "..."}
 - Constants: Configurable via Vault 'mover_constants' secret
+  Format: {
+    "IMAGES_ROOT_DIR": "data",
+    "PARENT_TAG_VALUE": "ai",
+    "UNSORTED_REMOTE_DIR": "_unsorted"
+  }
   - IMAGES_ROOT_DIR: Base directory for organized images
+  - PARENT_TAG_VALUE: Marker for relevant tags to process
   - UNSORTED_REMOTE_DIR: Source directory containing unorganized images
 - Thread limit: Maximum concurrent processing threads (currently set to 10)
 
@@ -51,7 +58,7 @@ nextcloud_client = Nextcloud(
 
 # Constants
 IMAGES_ROOT_DIR = constants_secret['IMAGES_ROOT_DIR']
-UNSORTED_REMOTE_DIR = constants_secret['UNSORTED_REMOTE_DIR']
+UNSORTED_REMOTE_DIR = f"{IMAGES_ROOT_DIR}/{constants_secret['UNSORTED_REMOTE_DIR']}"
 PARENT_TAG_VALUE = constants_secret['PARENT_TAG_VALUE']
 THREADS_LIMIT = 10
 
