@@ -39,6 +39,7 @@ Documentation:
 - https://cloud-py-api.github.io/nc_py_api/reference/Files/Files.html
 """
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from vault import VaultClient
 from nc_py_api import Nextcloud
 
@@ -145,20 +146,39 @@ def move_image(node: object, tags: list) -> None:
     print(f"File {node.name} has been processed. Tag has been unassigned.")
 
 
+def process_image(node: object) -> None:
+    """
+    Retrieve tags for a single image and move it if tags are present.
+
+    This function is intended to be called concurrently via ThreadPoolExecutor.
+
+    Args:
+        node (object): A Nextcloud file node object representing the image to process.
+    """
+    tags = get_image_tags(file_id=node)
+    if len(tags) > 0:
+        move_image(node=node, tags=tags)
+
+
 if __name__ == "__main__":
     # Get files list in specific directory
     nodes = get_images_list()
     print(f"Files found: {len(nodes)}")
 
-    # Extract all tags in instance
+    # Print all tags available in the instance (useful for debugging)
     all_tags = get_tags_list()
-    print(f"Tags list:{all_tags}")
+    print(f"Tags list: {all_tags}")
 
-    # Find tag per image
-    print("Extracting tags per image...")
-    for node in nodes:
-        tags = get_image_tags(file_id=node)
-        if len(tags) > 0:
-            move_image(node=node, tags=tags)
+    # Process images concurrently: fetch tags + move each file in parallel
+    print(f"Processing images with up to {THREADS_LIMIT} parallel threads...")
+    with ThreadPoolExecutor(max_workers=THREADS_LIMIT) as executor:
+        futures = {executor.submit(process_image, node): node for node in nodes}
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as exc:
+                failed_node = futures[future]
+                print(f"Error processing file '{failed_node.name}': {exc}")
+
     print("Done.")
     sys.exit(0)
