@@ -38,30 +38,43 @@ Documentation:
 - https://cloud-py-api.github.io/nc_py_api/_modules/nc_py_api/files/files.html#FilesAPI.move
 - https://cloud-py-api.github.io/nc_py_api/reference/Files/Files.html
 """
+import argparse
+import logging
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from vault import VaultClient
-from nc_py_api import Nextcloud
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 
-# Secrets and credentials
-vault = VaultClient()
-webdav_secret = vault.kv2engine.read_secret("webdav")
-constants_secret = vault.kv2engine.read_secret("mover_constants")
-
-# Nextcloud client
-nextcloud_client = Nextcloud(
-    nextcloud_url=webdav_secret['host_url'],
-    nc_auth_user=webdav_secret['username'],
-    nc_auth_pass=webdav_secret['password']
-)
+LOGGER = logging.getLogger(__name__)
 
 
-# Constants
-IMAGES_ROOT_DIR = constants_secret['IMAGES_ROOT_DIR']
-UNSORTED_REMOTE_DIR = f"{IMAGES_ROOT_DIR}/{constants_secret['UNSORTED_REMOTE_DIR']}"
-PARENT_TAG_VALUE = constants_secret['PARENT_TAG_VALUE']
+nextcloud_client = None
+IMAGES_ROOT_DIR = ""
+UNSORTED_REMOTE_DIR = ""
+PARENT_TAG_VALUE = ""
 THREADS_LIMIT = 10
+
+
+def configure_nextcloud() -> None:
+    """
+    Initialize Nextcloud client and configuration values from Vault.
+    """
+    global nextcloud_client, IMAGES_ROOT_DIR, UNSORTED_REMOTE_DIR, PARENT_TAG_VALUE
+
+    from vault import VaultClient
+    from nc_py_api import Nextcloud
+
+    vault = VaultClient()
+    webdav_secret = vault.kv2engine.read_secret("webdav")
+    constants_secret = vault.kv2engine.read_secret("mover_constants")
+
+    nextcloud_client = Nextcloud(
+        nextcloud_url=webdav_secret['host_url'],
+        nc_auth_user=webdav_secret['username'],
+        nc_auth_pass=webdav_secret['password']
+    )
+    IMAGES_ROOT_DIR = constants_secret['IMAGES_ROOT_DIR']
+    UNSORTED_REMOTE_DIR = f"{IMAGES_ROOT_DIR}/{constants_secret['UNSORTED_REMOTE_DIR']}"
+    PARENT_TAG_VALUE = constants_secret['PARENT_TAG_VALUE']
 
 
 def get_images_list() -> list:
@@ -75,7 +88,6 @@ def get_images_list() -> list:
         list: A list of file node objects representing images in the unsorted directory.
               Each node contains file metadata including name, path, and file ID.
     """
-    print("Retrieving objects list...")
     return nextcloud_client.files.listdir(UNSORTED_REMOTE_DIR)
 
 
@@ -105,7 +117,7 @@ def get_tags_list() -> list:
     return nextcloud_client.files.list_tags()
 
 
-def move_image(node: object, tags: list) -> None:
+def move_image(node: object, tags: list, debug: bool = False) -> None:
     """
     Move an image file to an organized directory based on its tags.
 
@@ -138,15 +150,17 @@ def move_image(node: object, tags: list) -> None:
     tag_id = tags[0].tag_id
     tag_name = tags[0].display_name
     target_path = f"{IMAGES_ROOT_DIR}/{tag_name.replace(PARENT_TAG_VALUE + ':', '')}/{node.user_path.split('/')[-1]}"
-    print(f"File {node.name} will be to move in the {target_path}")
+    if debug:
+        LOGGER.debug("Moving %s to %s", node.name, target_path)
     # Move file
     nextcloud_client.files.move(path_src=node, path_dest=target_path)
     # Remove tag from processed file
     nextcloud_client.files.unassign_tag(file_id=node, tag_id=tag_id)
-    print(f"File {node.name} has been processed. Tag has been unassigned.")
+    if debug:
+        LOGGER.debug("Processed %s and unassigned tag %s", node.name, tag_name)
 
 
-def process_image(node: object) -> None:
+def process_image(node: object, debug: bool = False) -> None:
     """
     Retrieve tags for a single image and move it if tags are present.
 
@@ -155,30 +169,98 @@ def process_image(node: object) -> None:
     Args:
         node (object): A Nextcloud file node object representing the image to process.
     """
-    tags = get_image_tags(file_id=node)
-    if len(tags) > 0:
-        move_image(node=node, tags=tags)
+    try:
+        tags = get_image_tags(file_id=node)
+        if len(tags) > 0:
+            move_image(node=node, tags=tags, debug=debug)
+        elif debug:
+            LOGGER.debug("Skipping %s because it has no tags", node.name)
+    except Exception as exc:
+        raise RuntimeError(f"Failed processing file '{node.name}'") from exc
+
+
+def parse_args() -> argparse.Namespace:
+    """
+    Parse CLI arguments for the image mover script.
+    """
+    parser = argparse.ArgumentParser(
+        description="Move tagged images from the unsorted directory into tag-based folders."
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug output, including the full tag list and per-file operations.",
+    )
+    return parser.parse_args()
+
+
+def configure_logging(debug: bool) -> None:
+    """
+    Configure logging output for the script.
+    """
+    logging.basicConfig(
+        level=logging.DEBUG if debug else logging.ERROR,
+        format="%(levelname)s: %(message)s",
+    )
+
+
+def print_progress(completed: int, total: int, width: int = 40) -> None:
+    """
+    Render a compact progress bar for processed files.
+    """
+    if total == 0:
+        return
+
+    filled = int(width * completed / total)
+    bar = "#" * filled + "-" * (width - filled)
+    print(f"\rProgress: [{bar}] {completed}/{total}", end="", flush=True)
 
 
 if __name__ == "__main__":
+    args = parse_args()
+    configure_logging(debug=args.debug)
+    configure_nextcloud()
+
     # Get files list in specific directory
     nodes = get_images_list()
-    print(f"Files found: {len(nodes)}")
+    total_nodes = len(nodes)
+    print(f"Files found: {total_nodes}")
 
-    # Print all tags available in the instance (useful for debugging)
-    all_tags = get_tags_list()
-    print(f"Tags list: {all_tags}")
+    if total_nodes == 0:
+        print("Done.")
+        sys.exit(0)
+
+    if args.debug:
+        all_tags = get_tags_list()
+        LOGGER.debug("Tags list: %s", all_tags)
 
     # Process images concurrently: fetch tags + move each file in parallel
     print(f"Processing images with up to {THREADS_LIMIT} parallel threads...")
+    completed = 0
+    node_iterator = iter(nodes)
     with ThreadPoolExecutor(max_workers=THREADS_LIMIT) as executor:
-        futures = {executor.submit(process_image, node): node for node in nodes}
-        for future in as_completed(futures):
-            try:
-                future.result()
-            except Exception as exc:
-                failed_node = futures[future]
-                print(f"Error processing file '{failed_node.name}': {exc}")
+        futures = {
+            executor.submit(process_image, node, args.debug)
+            for node in [next(node_iterator) for _ in range(min(THREADS_LIMIT, total_nodes))]
+        }
+        while futures:
+            done, futures = wait(futures, return_when=FIRST_COMPLETED)
+            for future in done:
+                completed += 1
+                print_progress(completed=completed, total=total_nodes)
 
+                try:
+                    future.result()
+                except Exception:
+                    LOGGER.exception("Image processing failed")
+
+                try:
+                    next_node = next(node_iterator)
+                except StopIteration:
+                    continue
+
+                futures.add(executor.submit(process_image, next_node, args.debug))
+
+    print()
     print("Done.")
     sys.exit(0)
