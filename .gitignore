@@ -1,3 +1,42 @@
+# Runtime data of the image scripts
+#  scaler writes downloaded and processed images to ./tmp and ./output relative to cwd,
+#  so they must never get into a commit, wherever the script is run from
+tmp/
+output/
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.bmp
+*.tif
+*.tiff
+*.heic
+
+# Secrets and credentials
+.vault-token
+*.pem
+*.key
+*.crt
+*.p12
+credentials*.json
+secrets*.json
+
+# JupyterHub / Jupyter
+.Trash-*/
+.jupyter/
+.ipython/
+.local/
+.virtual_documents/
+
+# OS and editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
