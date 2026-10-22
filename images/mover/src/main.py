@@ -14,11 +14,11 @@ Main Features:
 - Integration with Nextcloud API for advanced file operations
 
 Workflow:
-1. Scans the UNSORTED_REMOTE_DIR for images with assigned tags
-2. Extracts tags from each image file
-3. Moves images to organized directories based on tag names
-4. Removes processed tags from files after successful movement
-5. Provides detailed logging of all operations
+1. Collects tags with the PARENT_TAG_VALUE prefix
+2. Skips tags whose target directory does not exist in IMAGES_ROOT_DIR
+3. Finds images in UNSORTED_REMOTE_DIR that carry the remaining tags
+4. Moves images to organized directories based on tag names
+5. Removes processed tags from files after successful movement
 
 Configuration:
 - Nextcloud credentials: Stored in Vault KV store under 'webdav' secret
@@ -32,7 +32,13 @@ Configuration:
   - IMAGES_ROOT_DIR: Base directory for organized images
   - PARENT_TAG_VALUE: Marker for relevant tags to process
   - UNSORTED_REMOTE_DIR: Source directory containing unorganized images
-- Thread limit: Maximum concurrent processing threads (currently set to 10)
+- Thread limit: Maximum concurrent processing threads (currently set to 3)
+
+Load on Nextcloud:
+- Images are discovered per tag with one REPORT request (systemtag filter) instead of
+  fetching tags for every file in UNSORTED_REMOTE_DIR, so untagged files cost nothing
+- Files are moved with a raw WebDAV MOVE: nc_py_api's files.move() follows every MOVE
+  with a SEARCH by fileid over the whole user home, which is what overloaded the instance
 
 Documentation:
 - https://cloud-py-api.github.io/nc_py_api/_modules/nc_py_api/files/files.html#FilesAPI.move
@@ -42,6 +48,7 @@ import argparse
 import logging
 import sys
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from urllib.parse import quote
 
 
 LOGGER = logging.getLogger(__name__)
@@ -51,7 +58,7 @@ nextcloud_client = None
 IMAGES_ROOT_DIR = ""
 UNSORTED_REMOTE_DIR = ""
 PARENT_TAG_VALUE = ""
-THREADS_LIMIT = 10
+THREADS_LIMIT = 3
 
 
 def configure_nextcloud() -> None:
@@ -77,55 +84,103 @@ def configure_nextcloud() -> None:
     PARENT_TAG_VALUE = constants_secret['PARENT_TAG_VALUE']
 
 
-def get_images_list() -> list:
+def get_parent_tags() -> list:
     """
-    Retrieve list of images to process from the unsorted WebDAV/Nextcloud folder.
+    Retrieve the tags relevant for processing from the Nextcloud instance.
 
-    This function scans the UNSORTED_REMOTE_DIR directory and returns a list of
-    file nodes that need to be processed for tag-based organization.
+    Only tags with the 'PARENT_TAG_VALUE:' prefix are returned (ex. ai:cats).
 
     Returns:
-        list: A list of file node objects representing images in the unsorted directory.
-              Each node contains file metadata including name, path, and file ID.
+        list: A list of tag objects. Each tag object contains metadata like tag_id,
+              display_name, and other properties.
     """
-    return nextcloud_client.files.listdir(UNSORTED_REMOTE_DIR)
+    return [
+        tag for tag in nextcloud_client.files.list_tags()
+        if tag.display_name.startswith(f"{PARENT_TAG_VALUE}:")
+    ]
 
 
-def get_image_tags(file_id: str) -> list:
+def get_tag_dir_name(tag: object) -> str:
     """
-    Get tags of image
+    Return the target directory name for a tag (ex. ai:cats -> cats).
 
     Args:
-        file_id (int): nc file id
+        tag (object): A tag object with the 'PARENT_TAG_VALUE:' prefix.
     """
-    return nextcloud_client.files.get_tags(file_id=file_id)
+    return tag.display_name.replace(PARENT_TAG_VALUE + ':', '')
 
 
-def get_tags_list() -> list:
+def get_target_dirs() -> set:
     """
-    Retrieve all available tags from the Nextcloud instance.
+    Retrieve the names of existing directories in IMAGES_ROOT_DIR.
 
-    This function fetches the complete list of tags that exist in the
-    Nextcloud system, which can be useful for debugging and understanding
-    the available tag structure.
+    A single PROPFIND request is enough to check target directories for all tags.
 
     Returns:
-        list: A list of all tag objects available in the Nextcloud instance.
-              Each tag object contains metadata like tag_id, display_name,
-              and other properties.
+        set: Names of the directories located directly in IMAGES_ROOT_DIR.
     """
-    return nextcloud_client.files.list_tags()
+    return {node.name for node in nextcloud_client.files.listdir(IMAGES_ROOT_DIR) if node.is_dir}
 
 
-def move_image(node: object, tags: list, debug: bool = False) -> None:
+def get_tagged_images(tags: list) -> list:
     """
-    Move an image file to an organized directory based on its tags.
+    Retrieve images with the given tags that are located directly in UNSORTED_REMOTE_DIR.
+
+    Each tag costs a single REPORT request, regardless of how many files are in the
+    unsorted directory. A file with several relevant tags is returned once, with the
+    first of them.
+
+    Args:
+        tags (list): A list of tag objects to search files by.
+
+    Returns:
+        list: A list of (node, tag) tuples, where node is a Nextcloud file node object
+              and tag is the tag that determines its target directory.
+    """
+    images = {}
+    unsorted_dir = UNSORTED_REMOTE_DIR.strip('/')
+    for tag in tags:
+        for node in nextcloud_client.files.list_by_criteria(tags=[tag]):
+            if node.is_dir or node.user_path.strip('/').rsplit('/', 1)[0] != unsorted_dir:
+                continue
+            images.setdefault(node.info.fileid, (node, tag))
+    return list(images.values())
+
+
+def dav_move(path_src: str, path_dest: str) -> None:
+    """
+    Move a file with a single WebDAV MOVE request.
+
+    nc_py_api's files.move() runs a SEARCH by fileid over the whole user home after
+    every MOVE to return the new node. The result is not needed here, and those
+    searches are the heaviest part of the load on Nextcloud.
+
+    Args:
+        path_src (str): Path of the existing file relative to the user's root directory.
+        path_dest (str): Target path relative to the user's root directory.
+    """
+    from nc_py_api._exceptions import check_error
+    from nc_py_api.files._files import dav_get_obj_path
+    from niquests.structures import CaseInsensitiveDict
+
+    session = nextcloud_client.files._session
+    dest = session.cfg.dav_endpoint + quote(dav_get_obj_path(session.user, path_dest))
+    response = session.adapter_dav.request(
+        "MOVE",
+        quote(dav_get_obj_path(session.user, path_src)),
+        headers=CaseInsensitiveDict({"Destination": dest.encode("utf-8"), "Overwrite": "F"}),
+    )
+    check_error(response, f"move: user={session.user}, src={path_src}, dest={dest}")
+
+
+def move_image(node: object, tag: object, debug: bool = False) -> None:
+    """
+    Move an image file to an organized directory based on its tag.
 
     This function processes a single image file by:
-    1. Extracting the first tag's information
-    2. Creating a target path based on the tag name (removing 'PARENT_TAG_VALUE' prefix)
-    3. Moving the file to the organized directory structure
-    4. Removing the processed tag from the file
+    1. Creating a target path based on the tag name (removing 'PARENT_TAG_VALUE' prefix)
+    2. Moving the file to the organized directory structure
+    3. Removing the processed tag from the file
 
     The function assumes tags follow the format 'PARENT_TAG_VALUE:category' where 'category'
     becomes the subdirectory name under IMAGES_ROOT_DIR (ex. ai:cats -> IMAGES_ROOT_DIR/cats).
@@ -135,46 +190,35 @@ def move_image(node: object, tags: list, debug: bool = False) -> None:
         node (object): A Nextcloud file node object containing file metadata
                       including name, path, and file ID. This represents the
                       image file to be moved.
-        tags (list): A list of tag objects associated with the file. Only the
-                    first tag in the list will be processed for determining
-                    the target directory.
+        tag (object): The tag object that determines the target directory.
 
     Returns:
         None: This function performs file operations but returns nothing.
-
-    Note:
-        - Only the first tag is processed; additional tags are ignored
-        - Tag names are expected to have 'PARENT_TAG_VALUE:' prefix which gets removed
-        - Files are moved to: IMAGES_ROOT_DIR/{tag_name_without_prefix}/filename
     """
-    tag_id = tags[0].tag_id
-    tag_name = tags[0].display_name
-    target_path = f"{IMAGES_ROOT_DIR}/{tag_name.replace(PARENT_TAG_VALUE + ':', '')}/{node.user_path.split('/')[-1]}"
+    tag_name = tag.display_name
+    target_path = f"{IMAGES_ROOT_DIR}/{get_tag_dir_name(tag)}/{node.user_path.split('/')[-1]}"
     if debug:
         LOGGER.debug("Moving %s to %s", node.name, target_path)
     # Move file
-    nextcloud_client.files.move(path_src=node, path_dest=target_path)
-    # Remove tag from processed file
-    nextcloud_client.files.unassign_tag(file_id=node, tag_id=tag_id)
+    dav_move(path_src=node.user_path, path_dest=target_path)
+    # Remove tag from processed file (fileid does not change on move)
+    nextcloud_client.files.unassign_tag(file_id=node.info.fileid, tag_id=tag.tag_id)
     if debug:
         LOGGER.debug("Processed %s and unassigned tag %s", node.name, tag_name)
 
 
-def process_image(node: object, debug: bool = False) -> None:
+def process_image(node: object, tag: object, debug: bool = False) -> None:
     """
-    Retrieve tags for a single image and move it if tags are present.
+    Move a single image to the directory of its tag.
 
     This function is intended to be called concurrently via ThreadPoolExecutor.
 
     Args:
         node (object): A Nextcloud file node object representing the image to process.
+        tag (object): The tag object that determines the target directory.
     """
     try:
-        tags = get_image_tags(file_id=node)
-        if len(tags) > 0:
-            move_image(node=node, tags=tags, debug=debug)
-        elif debug:
-            LOGGER.debug("Skipping %s because it has no tags", node.name)
+        move_image(node=node, tag=tag, debug=debug)
     except Exception as exc:
         raise RuntimeError(f"Failed processing file '{node.name}'") from exc
 
@@ -221,33 +265,40 @@ if __name__ == "__main__":
     configure_logging(debug=args.debug)
     configure_nextcloud()
 
-    # Get files list in specific directory
-    nodes = get_images_list()
-    total_nodes = len(nodes)
-    print(f"Files found: {total_nodes}")
+    # Get relevant tags and the images in the unsorted directory that carry them
+    tags = get_parent_tags()
+    if args.debug:
+        LOGGER.debug("Tags list: %s", tags)
 
-    if total_nodes == 0:
+    # Skip tags without a target directory: their files stay in the unsorted directory with the tag
+    target_dirs = get_target_dirs()
+    skipped_tags = [tag.display_name for tag in tags if get_tag_dir_name(tag) not in target_dirs]
+    if skipped_tags:
+        print(f"Skipping tags without target directory in {IMAGES_ROOT_DIR}: {', '.join(skipped_tags)}")
+    tags = [tag for tag in tags if get_tag_dir_name(tag) in target_dirs]
+
+    images = get_tagged_images(tags=tags)
+    total_images = len(images)
+    print(f"Tagged files found: {total_images}")
+
+    if total_images == 0:
         print("Done.")
         sys.exit(0)
 
-    if args.debug:
-        all_tags = get_tags_list()
-        LOGGER.debug("Tags list: %s", all_tags)
-
-    # Process images concurrently: fetch tags + move each file in parallel
+    # Process images concurrently: move each file and unassign its tag in parallel
     print(f"Processing images with up to {THREADS_LIMIT} parallel threads...")
     completed = 0
-    node_iterator = iter(nodes)
+    image_iterator = iter(images)
     with ThreadPoolExecutor(max_workers=THREADS_LIMIT) as executor:
         futures = {
-            executor.submit(process_image, node, args.debug)
-            for node in [next(node_iterator) for _ in range(min(THREADS_LIMIT, total_nodes))]
+            executor.submit(process_image, node, tag, args.debug)
+            for node, tag in [next(image_iterator) for _ in range(min(THREADS_LIMIT, total_images))]
         }
         while futures:
             done, futures = wait(futures, return_when=FIRST_COMPLETED)
             for future in done:
                 completed += 1
-                print_progress(completed=completed, total=total_nodes)
+                print_progress(completed=completed, total=total_images)
 
                 try:
                     future.result()
@@ -255,11 +306,11 @@ if __name__ == "__main__":
                     LOGGER.exception("Image processing failed")
 
                 try:
-                    next_node = next(node_iterator)
+                    next_node, next_tag = next(image_iterator)
                 except StopIteration:
                     continue
 
-                futures.add(executor.submit(process_image, next_node, args.debug))
+                futures.add(executor.submit(process_image, next_node, next_tag, args.debug))
 
     print()
     print("Done.")
