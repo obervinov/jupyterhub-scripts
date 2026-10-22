@@ -14,11 +14,11 @@ Main Features:
 - Integration with Nextcloud API for advanced file operations
 
 Workflow:
-1. Scans the UNSORTED_REMOTE_DIR for images with assigned tags
-2. Extracts tags from each image file
-3. Moves images to organized directories based on tag names
-4. Removes processed tags from files after successful movement
-5. Provides detailed logging of all operations
+1. Collects tags with the PARENT_TAG_VALUE prefix
+2. Skips tags whose target directory does not exist in IMAGES_ROOT_DIR
+3. Finds images in UNSORTED_REMOTE_DIR that carry the remaining tags
+4. Moves images to organized directories based on tag names
+5. Removes processed tags from files after successful movement
 
 Configuration:
 - Nextcloud credentials: Stored in Vault KV store under 'webdav' secret
@@ -100,6 +100,28 @@ def get_parent_tags() -> list:
     ]
 
 
+def get_tag_dir_name(tag: object) -> str:
+    """
+    Return the target directory name for a tag (ex. ai:cats -> cats).
+
+    Args:
+        tag (object): A tag object with the 'PARENT_TAG_VALUE:' prefix.
+    """
+    return tag.display_name.replace(PARENT_TAG_VALUE + ':', '')
+
+
+def get_target_dirs() -> set:
+    """
+    Retrieve the names of existing directories in IMAGES_ROOT_DIR.
+
+    A single PROPFIND request is enough to check target directories for all tags.
+
+    Returns:
+        set: Names of the directories located directly in IMAGES_ROOT_DIR.
+    """
+    return {node.name for node in nextcloud_client.files.listdir(IMAGES_ROOT_DIR) if node.is_dir}
+
+
 def get_tagged_images(tags: list) -> list:
     """
     Retrieve images with the given tags that are located directly in UNSORTED_REMOTE_DIR.
@@ -174,7 +196,7 @@ def move_image(node: object, tag: object, debug: bool = False) -> None:
         None: This function performs file operations but returns nothing.
     """
     tag_name = tag.display_name
-    target_path = f"{IMAGES_ROOT_DIR}/{tag_name.replace(PARENT_TAG_VALUE + ':', '')}/{node.user_path.split('/')[-1]}"
+    target_path = f"{IMAGES_ROOT_DIR}/{get_tag_dir_name(tag)}/{node.user_path.split('/')[-1]}"
     if debug:
         LOGGER.debug("Moving %s to %s", node.name, target_path)
     # Move file
@@ -247,6 +269,13 @@ if __name__ == "__main__":
     tags = get_parent_tags()
     if args.debug:
         LOGGER.debug("Tags list: %s", tags)
+
+    # Skip tags without a target directory: their files stay in the unsorted directory with the tag
+    target_dirs = get_target_dirs()
+    skipped_tags = [tag.display_name for tag in tags if get_tag_dir_name(tag) not in target_dirs]
+    if skipped_tags:
+        print(f"Skipping tags without target directory in {IMAGES_ROOT_DIR}: {', '.join(skipped_tags)}")
+    tags = [tag for tag in tags if get_tag_dir_name(tag) in target_dirs]
 
     images = get_tagged_images(tags=tags)
     total_images = len(images)
