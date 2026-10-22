@@ -137,16 +137,16 @@ def dav_move(path_src: str, path_dest: str) -> None:
         path_src (str): Path of the existing file relative to the user's root directory.
         path_dest (str): Target path relative to the user's root directory.
     """
-    from httpx import Headers
     from nc_py_api._exceptions import check_error
     from nc_py_api.files._files import dav_get_obj_path
+    from niquests.structures import CaseInsensitiveDict
 
     session = nextcloud_client.files._session
     dest = session.cfg.dav_endpoint + quote(dav_get_obj_path(session.user, path_dest))
     response = session.adapter_dav.request(
         "MOVE",
         quote(dav_get_obj_path(session.user, path_src)),
-        headers=Headers({"Destination": dest, "Overwrite": "F"}, encoding="utf-8"),
+        headers=CaseInsensitiveDict({"Destination": dest.encode("utf-8"), "Overwrite": "F"}),
     )
     check_error(response, f"move: user={session.user}, src={path_src}, dest={dest}")
 
